@@ -271,6 +271,9 @@ def diff_base_worktree(repo_dir, source, dest, pr):
     return wt if r.returncode == 0 else None
 
 
+MAX_AI_DIFF = 200_000  # AI'a kopyalanacak diff'in karakter ust siniri
+
+
 def open_diff(left, right):
     cmd = [PYCHARM_BIN, "diff", str(left), str(right)]
     if DRY_RUN:
@@ -301,10 +304,76 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def ai_diff(self, q):
+        """AI review icin unified diff uret (dosyadaysan o dosya, degilsen tum PR).
+
+        IDE acmaz; diff metnini dondurur, extension panoya kopyalar."""
+        g = lambda k: (q.get(k, [""])[0] or "").strip()
+        workspace, repo, pr = g("workspace"), g("repo"), g("pr")
+        source, dest = g("source").replace("…", "..."), g("dest").replace("…", "...")
+
+        if not (RE_WS.match(workspace) and RE_REPO.match(repo)):
+            return self.send_json(400, {"ok": False, "error": "bad workspace/repo"})
+        if pr and not RE_PR.match(pr):
+            return self.send_json(400, {"ok": False, "error": "bad pr"})
+        for b in (source, dest):
+            if b and (not RE_BRANCH.match(b) or b.startswith(("-", "/", ".")) or ".." in b):
+                return self.send_json(400, {"ok": False, "error": "bad branch"})
+        if not source or not dest:
+            return self.send_json(400, {"ok": False,
+                "error": "AI diff icin kaynak ve hedef branch lazim"})
+        raw_file = g("file")
+        f = clean_file_param(raw_file) if raw_file else None
+        if raw_file and not f:
+            return self.send_json(400, {"ok": False, "error": "bad file"})
+
+        repo_dir = find_repo(workspace, repo) or ensure_clone(workspace, repo)
+        if not repo_dir:
+            return self.send_json(404, {"ok": False,
+                "error": f"repo bulunamadi: {workspace}/{repo}"})
+        try:
+            source = resolve_branch(repo_dir, source)
+            dest = resolve_branch(repo_dir, dest)
+        except AmbiguousBranch as a:
+            return self.send_json(400, {"ok": False,
+                "error": f"'{a.prefix}...' birden fazla branch'e uyuyor: {', '.join(a.candidates[:8])}"})
+        bdir = diff_base_worktree(repo_dir, source, dest, pr)
+        pdir = ensure_worktree(repo_dir, source, pr)
+        if not bdir or not pdir:
+            return self.send_json(502, {"ok": False,
+                "error": "branch'ler hazirlanamadi (erisim/isim kontrol et)"})
+        base_sha = git_out(bdir, "rev-parse", "HEAD")
+        pr_sha = git_out(pdir, "rev-parse", "HEAD")
+        if not base_sha or not pr_sha:
+            return self.send_json(502, {"ok": False, "error": "commit cozulemedi"})
+        paths = ["--", f] if f else []
+        try:
+            stat = subprocess.run(["git", "-C", str(repo_dir), "diff", "--stat",
+                                   base_sha, pr_sha, *paths],
+                                  capture_output=True, text=True, timeout=60).stdout
+            diff = subprocess.run(["git", "-C", str(repo_dir), "diff", "--no-color",
+                                   "--no-ext-diff", "-U3", base_sha, pr_sha, *paths],
+                                  capture_output=True, text=True, timeout=60).stdout
+        except (subprocess.SubprocessError, OSError):
+            return self.send_json(502, {"ok": False, "error": "diff uretilemedi"})
+
+        scope = f"dosya: {f}" if f else "tum PR"
+        header = (f"# {workspace}/{repo} PR #{pr or '?'} ({scope})\n"
+                  f"# {source} -> {dest}\n\n")
+        text = header + (stat or "") + ("\n" if stat else "") + (diff or "(degisiklik yok)\n")
+        truncated = False
+        if len(text) > MAX_AI_DIFF:
+            text = text[:MAX_AI_DIFF] + f"\n\n... [kesildi: toplam {len(text)} karakter]"
+            truncated = True
+        return self.send_json(200, {"ok": True, "text": text,
+                             "chars": len(text), "truncated": truncated})
+
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/health":
             return self.send_json(200, {"ok": True})
+        if u.path == "/ai-diff":
+            return self.ai_diff(parse_qs(u.query))
         if u.path != "/open":
             return self.send_json(404, {"ok": False, "error": "unknown endpoint"})
         q = parse_qs(u.query)

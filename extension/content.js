@@ -193,6 +193,33 @@
     } catch { /* vazgecildi */ }
   }
 
+  async function copyForAI() {
+    try {
+      const c = ctx();
+      if (!c) return toast('Repo/PR parse edilemedi');
+      const { file } = fileFromHash();
+      const { source, dest } = await getBranches();
+      toast('AI diff\u2019i hazirlaniyor...');
+      // dosyadaysan o dosyanin diff'i, degilsen tum PR'in diff'i
+      chrome.runtime.sendMessage(
+        { type: 'bb-pycharm-open', path: '/ai-diff',
+          params: { workspace: c.workspace, repo: c.repo, pr: c.pr, file, source, dest } },
+        async (res) => {
+          if (chrome.runtime.lastError) return toast('Extension hatasi: ' + chrome.runtime.lastError.message);
+          if (!res || res.httpStatus === 0) return toast('Helper calismiyor!');
+          const j = res.body || {};
+          if (!j.ok) return toast(`Hata: ${j.error || res.httpStatus}`);
+          try {
+            await navigator.clipboard.writeText(j.text);
+            toast(`Kopyalandi (${j.chars} karakter${j.truncated ? ', sonu kesildi' : ''}) — AI'a yapistirabilirsin.`);
+          } catch {
+            toast('Kopyalanamadi (pano izni yok)');
+          }
+        }
+      );
+    } catch { /* vazgecildi */ }
+  }
+
   function toast(msg) {
     let el = document.getElementById('bb-pycharm-toast');
     if (!el) {
@@ -223,6 +250,7 @@
     bar.appendChild(mk('\u25B6 Dosyayı PyCharm\u2019da Aç', 'Diff teki dosyayi PR branch inde PyCharm da acar', openFile));
     bar.appendChild(mk('\u25B6 Projeyi Aç', 'PR branch ini worktree olarak acip tum projeyi PyCharm da acar', openProject));
     bar.appendChild(mk('\u25B6 Diff\u2019i Aç', 'PyCharm diff penceresinde once/sonra karsilastirmasi acar (dosyadaysan dosya, degilsen tum PR)', openDiff));
+    bar.appendChild(mk('AI için Kopyala', 'Diff i AI review icin panoya kopyala (dosyadaysan dosya, degilsen tum PR)', copyForAI));
     document.body.appendChild(bar);
   }
 

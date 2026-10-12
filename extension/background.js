@@ -4,7 +4,8 @@ const HELPER = 'http://127.0.0.1:8765';
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type !== 'bb-pycharm-open') return;
-  const url = HELPER + '/open?' + new URLSearchParams(msg.params).toString();
+  const path = msg.path || '/open';
+  const url = HELPER + path + '?' + new URLSearchParams(msg.params).toString();
   fetch(url)
     .then(async (r) => {
       let body = null;
