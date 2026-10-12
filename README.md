@@ -1,40 +1,54 @@
-# Bitbucket PR -> PyCharm (tek tik, tokensiz)
+# Bitbucket PR → PyCharm (one click, no token)
 
-Bitbucket PR diff sayfasindaki dosyayi veya tum projeyi tek tikla PR branch'inde
-PyCharm'da acar. API token gerekmez; mevcut git/SSH erisini kullanir.
-Mevcut checkout'una dokunmaz (`/tmp/bb-pr` altinda git worktree acar).
+Review Bitbucket pull requests in your IDE instead of the web diff viewer.
+A Chrome extension adds buttons to Bitbucket PR pages; a tiny local helper
+does the git work and opens PyCharm. No Bitbucket API token needed — it uses
+your existing git/SSH access. Your current checkout is never touched
+(the PR branch is materialized as a git worktree under `/tmp/bb-pr`).
 
-## Bilesenler
+## Components
 
-- `pycharm-pr-helper.py` — local server (`http://127.0.0.1:8765`)
-- `extension/` — Chrome extension (Manifest V3, basli basina, Tampermonkey gerekmez)
+- `pycharm-pr-helper.py` — local server (`http://127.0.0.1:8765`, stdlib only)
+- `extension/` — Chrome extension (Manifest V3, standalone, no Tampermonkey needed)
+- `install.sh` / `uninstall.sh` — one-command setup / removal (macOS)
 
-## Kurulum
+## Setup (2 minutes)
 
-Hizli yol (onerilen): `./install.sh` — helper'i kurar, baslatir, login'de
-otomatik baslayacak sekilde ayarlar. Ekibe dagitim icin `KURULUM.md`'ye bak.
+Requirements: macOS, Chrome, PyCharm (under `/Applications`), SSH access to Bitbucket.
 
-Manuel: `nohup python3 pycharm-pr-helper.py > helper.log 2>&1 &`
-Test: `curl -s http://127.0.0.1:8765/health` -> `{"ok": true}`
+1. Install the helper (single command — starts it now and on every login):
 
-2. Chrome'da `chrome://extensions` ac, sag ustte **Developer mode**'u aktif et,
-   **Load unpacked** ile `extension/` klasorunu yukle.
+   ```bash
+   git clone <REPO-URL> && cd bitbucket-pr && ./install.sh
+   ```
 
-## Kullanim
+   On success you will see `OK: helper is running (http://127.0.0.1:8765).`
 
-Bitbucket'ta herhangi bir PR sayfasinda sag altta uc buton cikar:
+2. In Chrome, once: open `chrome://extensions`, enable **Developer mode**,
+   click **Load unpacked** and select `~/bb-pycharm/extension`.
 
-- **Dosyayı PyCharm'da Aç** — diff'te tikladigin dosyayi PR branch'inin haliyle,
-  proje context'i icinde acar (kodun devami dahil tum dosya + tum repo gorunur,
-  istedigin baska dosyaya da bakabilirsin).
-- **Projeyi Aç** — PR branch'ini worktree olarak acip tum projeyi PyCharm'da acar.
-- **Diff'i Aç** — PyCharm'in diff penceresini acar: dosyadaysan o dosyanin
-  once/sonra karsilastirmasi, degilsen tum PR'in klasor diff'i (degisen dosyalar
-  arasi gezinme dahil). Base taraf merge-base'dir, yani Bitbucket'in gosterdigi
-  diff ile ayni mantik. Yeni/silinmis dosyada tek taraf acilip bilgi verilir.
-- **AI için Kopyala** — diff'i (dosyadaysan dosya, degilsen tum PR) unified diff
-  olarak panoya kopyalar; AI review icin yapistirirsin. 200K karakterde kesilir.
+## Usage
 
-Repo ilk seferde **tum bilgisayarda** aranir (Spotlight + home dizini),
-bulunca `~/.config/bb-pycharm-helper/repos.json`'a kaydedilir.
-Local'de hic yoksa SSH ile `~/developer/<repo>` altina clone'lanmaya calisilir.
+On any Bitbucket PR page, buttons appear at the bottom right:
+
+- **Open File in PyCharm** — opens the diffed file at its PR revision, inside the
+  full project context (whole file + whole repo browsable).
+- **Open Project** — checks out the PR branch as a worktree and opens the project.
+- **Open Diff** — before/after comparison in PyCharm's diff viewer (the file when
+  on a file, the whole PR as a directory diff otherwise). The base side is the
+  merge-base, i.e. the same three-dot semantics as Bitbucket's diff.
+- **Copy for AI** — copies the diff (file or whole PR) as unified diff to the
+  clipboard for AI review. Truncated at 200K chars.
+
+How it works: the extension reads workspace/repo/PR/file/branches from the page
+(no API calls), the helper finds the repo anywhere on the computer (Spotlight +
+home directory, then caches it), clones via SSH if missing, prepares worktrees
+for the PR branch and its merge-base, and invokes PyCharm.
+
+## Uninstall
+
+```bash
+cd <bitbucket-pr-clone> && ./uninstall.sh
+```
+
+and Remove the extension in `chrome://extensions`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Helper'i kaldirir (LaunchAgent + dosyalar).
+# Removes the helper (LaunchAgent + files).
 set -euo pipefail
 DEST="$HOME/bb-pycharm"
 PLIST="$HOME/Library/LaunchAgents/com.bb-pycharm.helper.plist"
@@ -9,4 +9,4 @@ launchctl bootout "gui/$UID_NUM" "$PLIST" 2>/dev/null || launchctl unload "$PLIS
 pkill -f pycharm-pr-helper 2>/dev/null || true
 rm -f "$PLIST"
 rm -rf "$DEST"
-echo "Kaldirildi."
+echo "Removed."

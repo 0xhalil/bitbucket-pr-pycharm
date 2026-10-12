@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Bitbucket -> PyCharm one-click helper (tokensiz).
+"""Bitbucket -> PyCharm one-click helper (no token needed).
 
-Tarayici userscript'i Bitbucket PR diff sayfasindan su istekleri atar:
+The browser extension sends requests like this from Bitbucket PR diff pages:
   http://127.0.0.1:8765/open?workspace=...&repo=...&file=...&line=...&pr=...&source=...&dest=...
 
-Bu server:
-  1. Repo'yu local'de bulur (~/developer altinda, eslesen bitbucket remote'una gore).
-     Bulamazsa SSH ile clone'lamayi dener (mevcut SSH erisimi kullanir, API token gerekmez).
-  2. PR source branch'i icin /tmp altinda git worktree acar (mevcut checkout'u bozmaz).
-  3. Dosyayi PyCharm'da, proje context'i + satir numarasi ile acar.
+This server:
+  1. Finds the repo locally (anywhere on the computer, matched by bitbucket remote).
+     Clones via SSH when missing (uses existing SSH access, no API token needed).
+  2. Materializes the PR source branch as a git worktree under /tmp
+     (never touches the current checkout).
+  3. Opens the file in PyCharm with project context + line number.
 
-Calistirma:
+Run:
   python3 pycharm-pr-helper.py [--port 8765]
 
 Env:
-  BB_PR_PORT, BB_PR_ROOTS (":" ile ayri), BB_PR_WORKTREE_BASE, DRY_RUN=1 (PyCharm acmadan test)
+  BB_PR_PORT, BB_PR_ROOTS (":" separated), BB_PR_WORKTREE_BASE, DRY_RUN=1 (no PyCharm in tests)
 """
 
 import json
@@ -22,7 +23,6 @@ import os
 import re
 import subprocess
 import sys
-from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -91,7 +91,7 @@ SKIP_DIRS = {"Library", "Applications", ".Trash", ".docker", ".cache",
 
 
 def is_excluded(path):
-    """Kendi worktree cache'imizi arama sonuclarindan cikar."""
+    """Keep our own worktree cache out of search results."""
     try:
         Path(path).resolve().relative_to(WORKTREE_BASE.resolve())
         return True
@@ -109,7 +109,7 @@ def check_candidate(cand, workspace, repo):
 
 
 def via_mdfind(repo):
-    """Spotlight ile tum bilgisayarda isim aramasi (macOS, hizli)."""
+    """Fast whole-computer name search via Spotlight (macOS)."""
     try:
         r = subprocess.run(["mdfind", f'kMDItemFSName == "{repo}"'],
                            capture_output=True, text=True, timeout=25)
@@ -133,13 +133,13 @@ def find_repo(workspace, repo):
         p = Path(mapping[key])
         if p.is_dir() and not is_excluded(p) and remote_matches(str(p), workspace, repo):
             return p
-    # 1) tum bilgisayar (Spotlight)
+    # 1) whole computer (Spotlight)
     for cand in via_mdfind(repo):
         if check_candidate(cand, workspace, repo):
             mapping[key] = cand
             save_mapping(mapping)
             return Path(cand)
-    # 2) fallback: kokleri gez
+    # 2) fallback: walk roots
     for root in walk_roots():
         for dirpath, dirnames, _ in os.walk(root, topdown=True):
             depth = len(Path(dirpath).relative_to(root).parts)
@@ -156,7 +156,7 @@ def find_repo(workspace, repo):
 
 
 def ensure_clone(workspace, repo):
-    """Repo local'de yoksa SSH ile clone'la (mevcut SSH erisimi, tokensiz)."""
+    """Clone via SSH when the repo is not local (uses existing SSH access, no token)."""
     target = roots()[0] / repo
     if target.exists():
         return None
@@ -186,11 +186,11 @@ def clean_file_param(f):
 
 
 def ensure_worktree(repo_dir, source, pr):
-    """PR branch'ini /tmp altinda worktree olarak acar, mevcut checkout'a dokunmaz."""
+    """Materialize the PR branch as a worktree under /tmp; never touches the checkout."""
     tag = re.sub(r"[^A-Za-z0-9_.\-]", "-", source) if source else f"pr-{pr or 'x'}"
     wt = WORKTREE_BASE / repo_dir.name / tag[:120]
     if worktree_exists(wt):
-        return wt  # onceden acilmis, oldugu gibi kullan
+        return wt  # reuse if already created
     ref = f"origin/{source}" if source else "HEAD"
     if source:
         subprocess.run(["git", "-C", str(repo_dir), "fetch", "origin", source],
@@ -198,7 +198,7 @@ def ensure_worktree(repo_dir, source, pr):
     r = subprocess.run(["git", "-C", str(repo_dir), "worktree", "add", "--detach",
                         str(wt), ref], capture_output=True, text=True, timeout=180)
     if r.returncode != 0:
-        # fetch tutmadiysa local ref ile dene
+        # if fetch failed, try the local ref
         if source:
             r = subprocess.run(["git", "-C", str(repo_dir), "worktree", "add", "--detach",
                                 str(wt), source], capture_output=True, text=True, timeout=180)
@@ -226,16 +226,16 @@ class AmbiguousBranch(Exception):
 
 
 def resolve_branch(repo_dir, name):
-    """Kesik branch ismini remote'tan tamamlama ("feature/CORE-1..." -> tam isim).
+    """Complete a truncated branch name via the remote ("feature/CORE-1..." -> full name).
 
-    Bitbucket chip'i uzun isimleri "..." ile keser; prefix ls-remote ile cozulur.
-    Tek eslesme varsa tam isim doner, cok eslesme varsa AmbiguousBranch atar."""
+    Bitbucket chips truncate long names with "..."; the prefix is resolved with ls-remote.
+    Returns the full name on a single match, raises AmbiguousBranch on several."""
     name = (name or "").strip()
     if not name:
         return ""
     if git_out(repo_dir, "rev-parse", "--verify", f"origin/{name}") or \
        git_out(repo_dir, "rev-parse", "--verify", name):
-        return name  # tam isim zaten biliniyor
+        return name  # exact name already known
     if name.endswith("..."):
         prefix = name[:-3]
         out = git_out(repo_dir, "ls-remote", "--heads", "origin", prefix + "*", timeout=60)
@@ -245,13 +245,13 @@ def resolve_branch(repo_dir, name):
             return refs[0]
         if len(refs) > 1:
             raise AmbiguousBranch(prefix, sorted(refs))
-    return name  # cozulemedi; fetch asamasinda net hata verecek
+    return name  # unresolved; fetch will produce a clear error
 
 
 def diff_base_worktree(repo_dir, source, dest, pr):
-    """Diff'in sol tarafi: source ile dest'in merge-base'i (PR'in dalindigi nokta).
+    """Left side of the diff: merge-base of source and dest (where the PR branched off).
 
-    Bitbucket PR diff'i de bu mantikla calisir (three-dot diff)."""
+    Bitbucket PR diffs work the same way (three-dot diff)."""
     tag = (re.sub(r"[^A-Za-z0-9_.\-]", "-", source) if source else f"pr-{pr or 'x'}")[:120]
     wt = WORKTREE_BASE / repo_dir.name / f"{tag}-base"
     if worktree_exists(wt):
@@ -261,7 +261,7 @@ def diff_base_worktree(repo_dir, source, dest, pr):
     mb = git_out(repo_dir, "merge-base", f"origin/{source}", f"origin/{dest}")
     if not mb:
         mb = git_out(repo_dir, "merge-base", source, dest)
-    if not mb:  # son care: dest'in ucu
+    if not mb:  # last resort: tip of dest
         mb = git_out(repo_dir, "rev-parse", "--verify", f"origin/{dest}") or \
              git_out(repo_dir, "rev-parse", "--verify", dest)
     if not mb:
@@ -271,7 +271,7 @@ def diff_base_worktree(repo_dir, source, dest, pr):
     return wt if r.returncode == 0 else None
 
 
-MAX_AI_DIFF = 200_000  # AI'a kopyalanacak diff'in karakter ust siniri
+MAX_AI_DIFF = 200_000  # upper character limit for AI-copied diffs
 
 
 def open_diff(left, right):
@@ -305,9 +305,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def ai_diff(self, q):
-        """AI review icin unified diff uret (dosyadaysan o dosya, degilsen tum PR).
+        """Produce a unified diff for AI review (single file when on a file, whole PR otherwise).
 
-        IDE acmaz; diff metnini dondurur, extension panoya kopyalar."""
+        Never opens the IDE; returns diff text for the extension to copy."""
         g = lambda k: (q.get(k, [""])[0] or "").strip()
         workspace, repo, pr = g("workspace"), g("repo"), g("pr")
         source, dest = g("source").replace("…", "..."), g("dest").replace("…", "...")
@@ -321,7 +321,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(400, {"ok": False, "error": "bad branch"})
         if not source or not dest:
             return self.send_json(400, {"ok": False,
-                "error": "AI diff icin kaynak ve hedef branch lazim"})
+                "error": "AI diff needs source and destination branches"})
         raw_file = g("file")
         f = clean_file_param(raw_file) if raw_file else None
         if raw_file and not f:
@@ -330,22 +330,22 @@ class Handler(BaseHTTPRequestHandler):
         repo_dir = find_repo(workspace, repo) or ensure_clone(workspace, repo)
         if not repo_dir:
             return self.send_json(404, {"ok": False,
-                "error": f"repo bulunamadi: {workspace}/{repo}"})
+                "error": f"repo not found: {workspace}/{repo}"})
         try:
             source = resolve_branch(repo_dir, source)
             dest = resolve_branch(repo_dir, dest)
         except AmbiguousBranch as a:
             return self.send_json(400, {"ok": False,
-                "error": f"'{a.prefix}...' birden fazla branch'e uyuyor: {', '.join(a.candidates[:8])}"})
+                "error": f"'{a.prefix}...' matches multiple branches: {', '.join(a.candidates[:8])}"})
         bdir = diff_base_worktree(repo_dir, source, dest, pr)
         pdir = ensure_worktree(repo_dir, source, pr)
         if not bdir or not pdir:
             return self.send_json(502, {"ok": False,
-                "error": "branch'ler hazirlanamadi (erisim/isim kontrol et)"})
+                "error": "could not prepare branches (check access/name)"})
         base_sha = git_out(bdir, "rev-parse", "HEAD")
         pr_sha = git_out(pdir, "rev-parse", "HEAD")
         if not base_sha or not pr_sha:
-            return self.send_json(502, {"ok": False, "error": "commit cozulemedi"})
+            return self.send_json(502, {"ok": False, "error": "could not resolve commit"})
         paths = ["--", f] if f else []
         try:
             stat = subprocess.run(["git", "-C", str(repo_dir), "diff", "--stat",
@@ -355,15 +355,15 @@ class Handler(BaseHTTPRequestHandler):
                                    "--no-ext-diff", "-U3", base_sha, pr_sha, *paths],
                                   capture_output=True, text=True, timeout=60).stdout
         except (subprocess.SubprocessError, OSError):
-            return self.send_json(502, {"ok": False, "error": "diff uretilemedi"})
+            return self.send_json(502, {"ok": False, "error": "could not produce diff"})
 
-        scope = f"dosya: {f}" if f else "tum PR"
+        scope = f"file: {f}" if f else "whole PR"
         header = (f"# {workspace}/{repo} PR #{pr or '?'} ({scope})\n"
                   f"# {source} -> {dest}\n\n")
-        text = header + (stat or "") + ("\n" if stat else "") + (diff or "(degisiklik yok)\n")
+        text = header + (stat or "") + ("\n" if stat else "") + (diff or "(no changes)\n")
         truncated = False
         if len(text) > MAX_AI_DIFF:
-            text = text[:MAX_AI_DIFF] + f"\n\n... [kesildi: toplam {len(text)} karakter]"
+            text = text[:MAX_AI_DIFF] + f"\n\n... [truncated: {len(text)} chars total]"
             truncated = True
         return self.send_json(200, {"ok": True, "text": text,
                              "chars": len(text), "truncated": truncated})
@@ -380,8 +380,8 @@ class Handler(BaseHTTPRequestHandler):
         g = lambda k: (q.get(k, [""])[0] or "").strip()
         workspace, repo, pr = g("workspace"), g("repo"), g("pr")
         source, dest, line = g("source"), g("dest"), g("line") or "1"
-        view = g("view")  # "" veya "diff"
-        # Bitbucket chip'i ismi "..." ile kesmis olabilir ("…")
+        view = g("view")  # "" or "diff"
+        # Bitbucket chips may truncate names with "..." ("…")
         source, dest = source.replace("…", "..."), dest.replace("…", "...")
 
         if not (RE_WS.match(workspace) and RE_REPO.match(repo)):
@@ -396,7 +396,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             line = 1
         raw_file = g("file")
-        project_mode = not raw_file  # dosya verilmediyse tum projeyi ac
+        project_mode = not raw_file  # no file given means open the whole project
         f = clean_file_param(raw_file) if raw_file else None
         if raw_file and not f:
             return self.send_json(400, {"ok": False, "error": "bad file"})
@@ -404,9 +404,9 @@ class Handler(BaseHTTPRequestHandler):
         repo_dir = find_repo(workspace, repo) or ensure_clone(workspace, repo)
         if not repo_dir:
             return self.send_json(404, {"ok": False,
-                "error": f"repo bulunamadi: {workspace}/{repo} (bilgisayarda yok ve clone edilemedi)"})
+                "error": f"repo not found: {workspace}/{repo} (not on this computer and could not be cloned)"})
 
-        # kesik isimleri ("feature/CORE-1...") remote'tan tamamla
+        # complete truncated names ("feature/CORE-1...") via the remote
         try:
             if source:
                 source = resolve_branch(repo_dir, source)
@@ -414,24 +414,24 @@ class Handler(BaseHTTPRequestHandler):
                 dest = resolve_branch(repo_dir, dest)
         except AmbiguousBranch as a:
             return self.send_json(400, {"ok": False,
-                "error": f"'{a.prefix}...' birden fazla branch'e uyuyor: {', '.join(a.candidates[:8])}. Lutfen tam ismi gir."})
+                "error": f"'{a.prefix}...' matches multiple branches: {', '.join(a.candidates[:8])}. Please enter the full name."})
         base = ensure_worktree(repo_dir, source, pr) if source else None
         proj = base or repo_dir
         if source and base is None and not DRY_RUN:
-            # sessizce yanlis branch acmak yerine acikca hata ver
+            # fail loudly instead of silently opening the wrong branch
             return self.send_json(502, {"ok": False,
-                "error": f"'{source}' branch'i getirilemedi (erisim/isim kontrol et)"})
+                "error": f"could not fetch branch '{source}' (check access/name)"})
         if view == "diff":
             if not source:
                 return self.send_json(400, {"ok": False,
-                    "error": "diff icin source branch lazim (sayfadaki branch ismi okunamadi)"})
+                    "error": "diff needs the source branch (could not read it from the page)"})
             if not dest:
                 return self.send_json(400, {"ok": False,
-                    "error": "diff icin dest branch lazim (sayfadaki branch ismi okunamadi)"})
+                    "error": "diff needs the destination branch (could not read it from the page)"})
             bdir = diff_base_worktree(repo_dir, source, dest, pr)
             if not bdir:
                 return self.send_json(502, {"ok": False,
-                    "error": "base hali hazirlanamadi (merge-base bulunamadi)"})
+                    "error": "could not prepare base revision (merge-base not found)"})
             if project_mode:
                 cmd = open_diff(bdir, proj)
                 return self.send_json(200, {"ok": True, "view": "diff",
@@ -444,12 +444,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, {"ok": True, "view": "diff",
                                      "file": str(right.resolve()), "line": line,
                                      "source": source, "dest": dest, "cmd": cmd})
-            # yeni dosya / silinmis dosya: diff'in tek tarafi yok, dosyayi ac
-            note = "yeni dosya (base'de yok)" if right.exists() else \
-                   "silinmis dosya (PR'da yok, base hali)" if left.exists() else None
+            # new file / deleted file: only one side of the diff exists, open the file
+            note = "new file (not in base)" if right.exists() else \
+                   "deleted file (not in PR, showing base)" if left.exists() else None
             if note is None:
                 return self.send_json(404, {"ok": False,
-                    "error": "dosya ne base'de ne PR'da bulundu"})
+                    "error": "file found neither in base nor in PR"})
             side = right.resolve() if right.exists() else left.resolve()
             cmd = open_in_pycharm(proj if right.exists() else bdir, side, line)
             return self.send_json(200, {"ok": True, "view": "diff", "note": note,
@@ -465,7 +465,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self.send_json(400, {"ok": False, "error": "bad file"})
         if not target.exists() and not DRY_RUN:
-            # dosya bu branch'te yoksa (silinmis/tasinmis) ana checkout'ta dene
+            # if the file is not in this branch (deleted/moved), try the main checkout
             alt = (repo_dir / f)
             if alt.exists():
                 proj, target = repo_dir, alt
