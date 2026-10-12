@@ -193,40 +193,6 @@
     } catch { /* vazgecildi */ }
   }
 
-  function domDump() {
-    // Branch chip'lerinin gercek isaretlemesini teshis icin topla (t tam isim icerebilir).
-    const links = [...document.querySelectorAll('a[href*="/branch/"]')].map((a) => a.outerHTML.slice(0, 500));
-    const titles = [...new Set([...document.querySelectorAll('[title],[aria-label]')]
-      .map((e) => e.getAttribute('title') || e.getAttribute('aria-label'))
-      .filter((t) => t && t.length < 200))].slice(0, 60);
-    const txt = document.body?.innerText || '';
-    const mi = txt.indexOf('→');
-    const around = mi >= 0 ? txt.slice(Math.max(0, mi - 300), mi + 300) : txt.slice(0, 2000);
-    let container = '';
-    try {
-      const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      let n, g = 0;
-      while ((n = w.nextNode()) && g++ < 20000) {
-        if ((n.nodeValue || '').includes('→')) {
-          let p = n.parentElement;
-          for (let i = 0; i < 4 && p; i++) p = p.parentElement;
-          container = ((p || n.parentElement)?.outerHTML || '').slice(0, 6000);
-          break;
-        }
-      }
-    } catch { /* yoksay */ }
-    return JSON.stringify({ url: location.href, links, titles, around, container }, null, 1);
-  }
-
-  async function copyDom() {
-    try {
-      await navigator.clipboard.writeText(domDump());
-      toast('Kopyalandi! Sohbete yapistir, selector yazayim.');
-    } catch {
-      toast('Kopyalanamadi (pano izni yok)');
-    }
-  }
-
   function toast(msg) {
     let el = document.getElementById('bb-pycharm-toast');
     if (!el) {
@@ -257,7 +223,6 @@
     bar.appendChild(mk('\u25B6 Dosyayı PyCharm\u2019da Aç', 'Diff teki dosyayi PR branch inde PyCharm da acar', openFile));
     bar.appendChild(mk('\u25B6 Projeyi Aç', 'PR branch ini worktree olarak acip tum projeyi PyCharm da acar', openProject));
     bar.appendChild(mk('\u25B6 Diff\u2019i Aç', 'PyCharm diff penceresinde once/sonra karsilastirmasi acar (dosyadaysan dosya, degilsen tum PR)', openDiff));
-    bar.appendChild(mk('DOM Kopyala', 'Branch chip lerinin HTML ini panoya kopyala (teshis icin)', copyDom));
     document.body.appendChild(bar);
   }
 

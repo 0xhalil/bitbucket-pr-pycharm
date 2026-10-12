@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bitbucket PR -> PyCharm",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Bitbucket PR diff sayfasindaki dosyayi / projeyi tek tikla PyCharm'da acar (local helper uzerinden, tokensiz).",
   "content_scripts": [
     {
