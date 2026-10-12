@@ -21,6 +21,7 @@ Env:
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +32,48 @@ PYCHARM_BIN = "/Applications/PyCharm.app/Contents/MacOS/pycharm"
 HOME = Path.home()
 CONFIG_DIR = HOME / ".config" / "bb-pycharm-helper"
 MAPPING_FILE = CONFIG_DIR / "repos.json"
+
+PYCHARM_CANDIDATES = [
+    "/Applications/PyCharm.app/Contents/MacOS/pycharm",
+    "/Applications/PyCharm CE.app/Contents/MacOS/pycharm",
+    str(HOME / "Applications/PyCharm.app/Contents/MacOS/pycharm"),
+    str(HOME / "Applications/PyCharm CE.app/Contents/MacOS/pycharm"),
+]
+_PYCHARM_CACHE = {}
+
+
+def discover_pycharm():
+    """Find the PyCharm binary on any Mac: /Applications, ~/Applications,
+    JetBrains Toolbox installs, CLI launchers, Spotlight. Returns path or None."""
+    for c in PYCHARM_CANDIDATES:
+        if c and os.access(c, os.X_OK):
+            return c
+    for tool in ("pycharm", "charm"):
+        w = shutil.which(tool)
+        if w:
+            return w
+    for app in ("PyCharm.app", "PyCharm CE.app"):
+        try:
+            r = subprocess.run(["mdfind", f"kMDItemFSName == '{app}'"],
+                               capture_output=True, text=True, timeout=25)
+        except (subprocess.SubprocessError, OSError, FileNotFoundError):
+            continue
+        for ln in r.stdout.splitlines():
+            cand = str(Path(ln.strip()) / "Contents/MacOS/pycharm")
+            if os.access(cand, os.X_OK):
+                return cand
+    return None
+
+
+def pycharm_bin():
+    """Resolved PyCharm binary. BB_PYCHARM_BIN env overrides strictly (for tests
+    and non-standard installs); otherwise auto-discover once and cache."""
+    forced = os.environ.get("BB_PYCHARM_BIN")
+    if forced is not None:
+        return forced if os.access(forced, os.X_OK) else None
+    if "bin" not in _PYCHARM_CACHE:
+        _PYCHARM_CACHE["bin"] = discover_pycharm()
+    return _PYCHARM_CACHE["bin"]
 
 DEFAULT_ROOTS = [
     HOME / "developer",
@@ -195,20 +238,56 @@ def ensure_worktree(repo_dir, source, pr):
     if source:
         subprocess.run(["git", "-C", str(repo_dir), "fetch", "origin", source],
                        capture_output=True, timeout=120)
-    r = subprocess.run(["git", "-C", str(repo_dir), "worktree", "add", "--detach",
-                        str(wt), ref], capture_output=True, text=True, timeout=180)
-    if r.returncode != 0:
-        # if fetch failed, try the local ref
-        if source:
-            r = subprocess.run(["git", "-C", str(repo_dir), "worktree", "add", "--detach",
-                                str(wt), source], capture_output=True, text=True, timeout=180)
-        if r.returncode != 0:
-            return None
-    return wt
+    refs = [ref] + ([source] if source else [])  # fall back to the local ref if fetch failed
+    return _worktree_add(repo_dir, wt, refs)
 
 
 def worktree_exists(wt):
-    return (wt / ".git").exists() or (wt.exists() and (wt / ".git").is_file())
+    """A worktree slot counts as usable only if git itself agrees
+    (a leftover .git file may point at a deleted gitdir)."""
+    if not wt.is_dir() or not (wt / ".git").exists():
+        return False
+    try:
+        r = subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
+                           capture_output=True, text=True, timeout=15)
+        return r.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def _clear_wt_slot(repo_dir, wt):
+    """Remove a stale directory blocking a worktree slot (never touches valid worktrees)."""
+    if worktree_exists(wt):
+        return
+    if wt.exists() or wt.is_symlink():
+        try:
+            if wt.is_dir() and not wt.is_symlink():
+                shutil.rmtree(wt)
+            else:
+                wt.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _worktree_add(repo_dir, wt, refs):
+    """`git worktree add` with self-healing: prunes ghost registrations left behind
+    e.g. by macOS clearing /tmp on reboot, and clears stale leftover dirs."""
+    if worktree_exists(wt):
+        return wt
+    _clear_wt_slot(repo_dir, wt)
+    for ref in refs:
+        r = subprocess.run(["git", "-C", str(repo_dir), "worktree", "add", "--detach",
+                            str(wt), ref], capture_output=True, text=True, timeout=180)
+        if r.returncode == 0:
+            return wt
+        # slot may be ghost-registered: prune and retry the same ref once
+        git_out(repo_dir, "worktree", "prune")
+        _clear_wt_slot(repo_dir, wt)
+        r = subprocess.run(["git", "-C", str(repo_dir), "worktree", "add", "--detach",
+                            str(wt), ref], capture_output=True, text=True, timeout=180)
+        if r.returncode == 0:
+            return wt
+    return None
 
 
 def git_out(repo_dir, *args, timeout=60):
@@ -266,16 +345,14 @@ def diff_base_worktree(repo_dir, source, dest, pr):
              git_out(repo_dir, "rev-parse", "--verify", dest)
     if not mb:
         return None
-    r = subprocess.run(["git", "-C", str(repo_dir), "worktree", "add", "--detach",
-                        str(wt), mb], capture_output=True, text=True, timeout=180)
-    return wt if r.returncode == 0 else None
+    return _worktree_add(repo_dir, wt, [mb])
 
 
 MAX_AI_DIFF = 200_000  # upper character limit for AI-copied diffs
 
 
 def open_diff(left, right):
-    cmd = [PYCHARM_BIN, "diff", str(left), str(right)]
+    cmd = [pycharm_bin(), "diff", str(left), str(right)]
     if DRY_RUN:
         return cmd
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -283,8 +360,9 @@ def open_diff(left, right):
 
 
 def open_in_pycharm(project_dir, filepath=None, line=1):
-    cmd = [PYCHARM_BIN, str(project_dir)] if filepath is None else \
-          [PYCHARM_BIN, str(project_dir), "--line", str(line), str(filepath)]
+    b = pycharm_bin()
+    cmd = [b, str(project_dir)] if filepath is None else \
+          [b, str(project_dir), "--line", str(line), str(filepath)]
     if DRY_RUN:
         return cmd
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -340,8 +418,9 @@ class Handler(BaseHTTPRequestHandler):
         bdir = diff_base_worktree(repo_dir, source, dest, pr)
         pdir = ensure_worktree(repo_dir, source, pr)
         if not bdir or not pdir:
+            missing = [n for n, d in (("base", bdir), ("PR", pdir)) if not d]
             return self.send_json(502, {"ok": False,
-                "error": "could not prepare branches (check access/name)"})
+                "error": f"could not prepare {', '.join(missing)} worktree(s) (check access/name)"})
         base_sha = git_out(bdir, "rev-parse", "HEAD")
         pr_sha = git_out(pdir, "rev-parse", "HEAD")
         if not base_sha or not pr_sha:
@@ -395,6 +474,10 @@ class Handler(BaseHTTPRequestHandler):
             line = max(1, min(int(line), 10_000_000))
         except ValueError:
             line = 1
+        if pycharm_bin() is None:
+            return self.send_json(502, {"ok": False,
+                "error": "PyCharm not found (checked /Applications, ~/Applications, Toolbox installs, PATH). "
+                         "Install it or set BB_PYCHARM_BIN to its binary."})
         raw_file = g("file")
         project_mode = not raw_file  # no file given means open the whole project
         f = clean_file_param(raw_file) if raw_file else None

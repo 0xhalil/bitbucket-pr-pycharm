@@ -234,8 +234,20 @@
     el._t = setTimeout(() => (el.style.display = 'none'), 4000);
   }
 
+  function isPRPage() {
+    return /\/pull-requests\/\d+/.test(location.pathname);
+  }
+
   function mount() {
-    if (document.getElementById('bb-pycharm-bar')) return;
+    const existing = document.getElementById('bb-pycharm-bar');
+    // Bitbucket SPA: PR disina gecince butonlari kaldir, PR'a donunce geri ekle
+    if (!isPRPage()) {
+      if (existing) existing.remove();
+      const form = document.getElementById('bb-pycharm-form');
+      if (form) form.remove();
+      return;
+    }
+    if (existing) return;
     const bar = document.createElement('div');
     bar.id = 'bb-pycharm-bar';
     bar.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:99999;display:flex;gap:8px';
