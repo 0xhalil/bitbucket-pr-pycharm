@@ -19,7 +19,7 @@ Requirements: macOS, Chrome, PyCharm (under `/Applications`), SSH access to Bitb
 1. Install the helper (single command — starts it now and on every login):
 
    ```bash
-   git clone <REPO-URL> && cd bitbucket-pr && ./install.sh
+   git clone https://github.com/0xhalil/bitbucket-pr-pycharm.git && cd bitbucket-pr-pycharm && ./install.sh
    ```
 
    On success you will see `OK: helper is running (http://127.0.0.1:8765).`
