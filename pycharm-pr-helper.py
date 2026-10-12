@@ -220,6 +220,34 @@ def git_out(repo_dir, *args, timeout=60):
         return None
 
 
+class AmbiguousBranch(Exception):
+    def __init__(self, prefix, candidates):
+        self.prefix, self.candidates = prefix, candidates
+
+
+def resolve_branch(repo_dir, name):
+    """Kesik branch ismini remote'tan tamamlama ("feature/CORE-1..." -> tam isim).
+
+    Bitbucket chip'i uzun isimleri "..." ile keser; prefix ls-remote ile cozulur.
+    Tek eslesme varsa tam isim doner, cok eslesme varsa AmbiguousBranch atar."""
+    name = (name or "").strip()
+    if not name:
+        return ""
+    if git_out(repo_dir, "rev-parse", "--verify", f"origin/{name}") or \
+       git_out(repo_dir, "rev-parse", "--verify", name):
+        return name  # tam isim zaten biliniyor
+    if name.endswith("..."):
+        prefix = name[:-3]
+        out = git_out(repo_dir, "ls-remote", "--heads", "origin", prefix + "*", timeout=60)
+        refs = [ln.split("\t")[1].replace("refs/heads/", "")
+                for ln in (out or "").splitlines() if "refs/heads/" in ln]
+        if len(refs) == 1:
+            return refs[0]
+        if len(refs) > 1:
+            raise AmbiguousBranch(prefix, sorted(refs))
+    return name  # cozulemedi; fetch asamasinda net hata verecek
+
+
 def diff_base_worktree(repo_dir, source, dest, pr):
     """Diff'in sol tarafi: source ile dest'in merge-base'i (PR'in dalindigi nokta).
 
@@ -284,6 +312,8 @@ class Handler(BaseHTTPRequestHandler):
         workspace, repo, pr = g("workspace"), g("repo"), g("pr")
         source, dest, line = g("source"), g("dest"), g("line") or "1"
         view = g("view")  # "" veya "diff"
+        # Bitbucket chip'i ismi "..." ile kesmis olabilir ("…")
+        source, dest = source.replace("…", "..."), dest.replace("…", "...")
 
         if not (RE_WS.match(workspace) and RE_REPO.match(repo)):
             return self.send_json(400, {"ok": False, "error": "bad workspace/repo"})
@@ -307,8 +337,21 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(404, {"ok": False,
                 "error": f"repo bulunamadi: {workspace}/{repo} (bilgisayarda yok ve clone edilemedi)"})
 
+        # kesik isimleri ("feature/CORE-1...") remote'tan tamamla
+        try:
+            if source:
+                source = resolve_branch(repo_dir, source)
+            if dest:
+                dest = resolve_branch(repo_dir, dest)
+        except AmbiguousBranch as a:
+            return self.send_json(400, {"ok": False,
+                "error": f"'{a.prefix}...' birden fazla branch'e uyuyor: {', '.join(a.candidates[:8])}. Lutfen tam ismi gir."})
         base = ensure_worktree(repo_dir, source, pr) if source else None
         proj = base or repo_dir
+        if source and base is None and not DRY_RUN:
+            # sessizce yanlis branch acmak yerine acikca hata ver
+            return self.send_json(502, {"ok": False,
+                "error": f"'{source}' branch'i getirilemedi (erisim/isim kontrol et)"})
         if view == "diff":
             if not source:
                 return self.send_json(400, {"ok": False,
