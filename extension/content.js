@@ -24,6 +24,12 @@
   // --- branch tespiti ---
 
   function autoBranches() {
+    // 0) PR header'indaki "Branch: <isim>" etiketleri (tam isim, kesintisiz) — birincil yontem
+    try {
+      const labels = [...(document.body?.innerText || '').matchAll(/Branch:\s*([^\s]+)/g)].map((x) => x[1]);
+      if (labels.length >= 2) return { source: labels[0], dest: labels[1] };
+    } catch { /* yoksay */ }
+
     // 1) data-qa/testid (eski seciciler)
     const q = (s) => document.querySelector(s);
     let source = '', dest = '';
