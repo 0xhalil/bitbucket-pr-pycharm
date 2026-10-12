@@ -21,21 +21,111 @@
     return { file: rest.replace(/:\d+.*$/, ''), line };
   }
 
-  function branches() {
-    // best-effort: PR header'indan source/dest branch; bulunamazsa helper mevcut branch'i acar
-    let source = '', dest = '';
+  // --- branch tespiti ---
+
+  function autoBranches() {
+    // 1) data-qa/testid (eski seciciler)
     const q = (s) => document.querySelector(s);
+    let source = '', dest = '';
     const srcEl = q('[data-qa*="source-branch"]') || q('[data-testid*="source-branch"]');
     const dstEl = q('[data-qa*="destination-branch"]') || q('[data-testid*="destination-branch"]');
-    if (srcEl) source = srcEl.textContent.trim().split(/\s+/)[0];
-    if (dstEl) dest = dstEl.textContent.trim().split(/\s+/)[0];
-    if (!source) {
-      const txt = (document.body?.innerText || '').slice(0, 20000);
-      const m = txt.match(/from\s+([\w\-./]+)\s+(?:into|to|→)\s+([\w\-./]+)/i);
-      if (m) { source = m[1]; dest = m[2]; }
+    if (srcEl) source = (srcEl.textContent || '').trim().split(/\s+/)[0];
+    if (dstEl) dest = (dstEl.textContent || '').trim().split(/\s+/)[0];
+    if (source && dest) return { source, dest };
+
+    // 2) sayfadaki branch linkleri: /<ws>/<repo>/branch/<isim> (PR header'da kaynak once, hedef sonra)
+    const c = ctx();
+    const seen = [];
+    const anchors = document.querySelectorAll('a[href*="/branch/"]');
+    for (const a of anchors) {
+      const href = (a.getAttribute && a.getAttribute('href')) || a.href || '';
+      try {
+        const u = new URL(href, location.origin);
+        const m = u.pathname.match(/^\/([^/]+)\/([^/]+)\/branch\/(.+)$/);
+        if (!m || m[1] !== c.workspace || m[2] !== c.repo) continue;
+        const name = decodeURIComponent(m[3]);
+        if (name && !seen.includes(name)) seen.push(name);
+      } catch { /* yoksay */ }
+      if (seen.length >= 2) break;
     }
+    if (seen.length >= 2) return { source: seen[0], dest: seen[1] };
+
+    // 3) header metnindeki "X → Y" / "from X into Y" kalibi
+    const txt = (document.body?.innerText || '').slice(0, 20000);
+    let m = txt.match(/from\s+([\w\-./]+)\s+(?:into|to|→)\s+([\w\-./]+)/i)
+         || txt.match(/([\w\-./]+)\s+→\s+([\w\-./]+)/);
+    if (m) return { source: m[1], dest: m[2] };
+
     return { source, dest };
   }
+
+  function storageKey(c) {
+    return `bb-branches:${c.workspace}/${c.repo}/${c.pr}`;
+  }
+
+  function askBranches(auto) {
+    // Otomatik tespit basarisizsa sayfada mini form goster, bir kez sor, hatirla.
+    return new Promise((resolve, reject) => {
+      const old = document.getElementById('bb-pycharm-form');
+      if (old) old.remove();
+      const box = document.createElement('div');
+      box.id = 'bb-pycharm-form';
+      box.style.cssText = 'position:fixed;bottom:70px;right:20px;z-index:100000;background:#fff;color:#172b4d;border:1px solid #dfe1e6;border-radius:8px;padding:12px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.3);display:flex;flex-direction:column;gap:8px;width:280px';
+      box.innerHTML = `<b>Branch'ler okunamadı</b>
+        <span style="color:#5e6c84">PR sayfasının üstünde yazan kaynak ve hedef branch'i bir kez gir, bu PR için hatırlayayım.</span>`;
+      const mkInput = (label, value) => {
+        const l = document.createElement('label');
+        l.style.cssText = 'display:flex;flex-direction:column;gap:4px;font-weight:600';
+        l.textContent = label;
+        const inp = document.createElement('input');
+        inp.value = value || '';
+        inp.style.cssText = 'border:1px solid #dfe1e6;border-radius:4px;padding:6px 8px;font-size:13px';
+        l.appendChild(inp);
+        return { l, inp };
+      };
+      const s = mkInput('Kaynak (PR\'ın dalı)', auto.source);
+      const d = mkInput('Hedef (merge edilecek dal)', auto.dest);
+      box.appendChild(s.l);
+      box.appendChild(d.l);
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end';
+      const cancel = document.createElement('button');
+      cancel.textContent = 'Vazgeç';
+      const ok = document.createElement('button');
+      ok.textContent = 'Aç';
+      ok.style.cssText = 'background:#0052cc;color:#fff;border:0;border-radius:4px;padding:6px 14px;cursor:pointer';
+      cancel.style.cssText = 'background:transparent;border:0;cursor:pointer;color:#5e6c84';
+      cancel.onclick = () => { box.remove(); reject(new Error('cancel')); };
+      ok.onclick = () => {
+        const v = { source: s.inp.value.trim(), dest: d.inp.value.trim() };
+        if (!v.source || !v.dest) return;
+        box.remove();
+        const c = ctx();
+        chrome.storage.local.set({ [storageKey(c)]: v });
+        resolve(v);
+      };
+      row.appendChild(cancel);
+      row.appendChild(ok);
+      box.appendChild(row);
+      document.body.appendChild(box);
+      // input yaratamayan test ortaminda asili kalma
+      if (!s.inp || typeof s.inp.focus !== 'function') { box.remove(); reject(new Error('no-dom')); }
+    });
+  }
+
+  async function getBranches() {
+    const auto = autoBranches();
+    if (auto.source && auto.dest) return auto;
+    const c = ctx();
+    try {
+      const stored = await chrome.storage.local.get(storageKey(c));
+      const v = stored[storageKey(c)];
+      if (v?.source && v?.dest) return v;
+    } catch { /* storage yoksa forma dus */ }
+    return askBranches(auto);
+  }
+
+  // --- helper cagrisi ---
 
   function callHelper(params, needFile) {
     const c = ctx();
@@ -46,7 +136,7 @@
       { type: 'bb-pycharm-open', params: { workspace: c.workspace, repo: c.repo, pr: c.pr, ...params } },
       (res) => {
         if (chrome.runtime.lastError) return toast('Extension hatasi: ' + chrome.runtime.lastError.message);
-        if (!res || res.httpStatus === 0) return toast('Helper calismiyor! Terminalde: python3 pycharm-pr-helper.py');
+        if (!res || res.httpStatus === 0) return toast('Helper calismiyor! Terminalde: ~/bb-pycharm icin ./install.sh');
         const j = res.body || {};
         toast(j.ok ? `Acildi: ${j.note ? j.note + ' — ' : ''}${j.file || j.project}${j.line ? ':' + j.line : ''}`
                    : `Hata: ${j.error || res.httpStatus}`);
@@ -54,22 +144,32 @@
     );
   }
 
-  function openFile() {
-    const { file, line } = fileFromHash();
-    const { source, dest } = branches();
-    callHelper({ file, line: String(line), source, dest }, true);
+  async function openFile() {
+    try {
+      const { file, line } = fileFromHash();
+      if (!file) return toast('Once bir dosyaya tikla (URL hash inde dosya yok)');
+      const { source, dest } = await getBranches();
+      toast(`${source} → ${dest}`);
+      callHelper({ file, line: String(line), source, dest }, true);
+    } catch { /* vazgecildi */ }
   }
 
-  function openDiff() {
-    const { file, line } = fileFromHash();
-    const { source, dest } = branches();
-    // file varsa dosya diff'i, yoksa tum PR'in klasor diff'i
-    callHelper({ view: 'diff', file, line: String(line), source, dest }, false);
+  async function openProject() {
+    try {
+      const { source, dest } = await getBranches();
+      toast(`${source} → ${dest}`);
+      callHelper({ source, dest }, false);
+    } catch { /* vazgecildi */ }
   }
 
-  function openProject() {
-    const { source, dest } = branches();
-    callHelper({ source, dest }, false); // file yok -> helper tum projeyi acar
+  async function openDiff() {
+    try {
+      const { file, line } = fileFromHash();
+      const { source, dest } = await getBranches();
+      toast(`${source} → ${dest}`);
+      // file varsa dosya diff'i, yoksa tum PR'in klasor diff'i
+      callHelper({ view: 'diff', file, line: String(line), source, dest }, false);
+    } catch { /* vazgecildi */ }
   }
 
   function toast(msg) {

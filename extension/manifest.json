@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bitbucket PR -> PyCharm",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bitbucket PR diff sayfasindaki dosyayi / projeyi tek tikla PyCharm'da acar (local helper uzerinden, tokensiz).",
   "content_scripts": [
     {
@@ -13,5 +13,6 @@
   "background": {
     "service_worker": "background.js"
   },
-  "host_permissions": ["http://127.0.0.1/*"]
+  "host_permissions": ["http://127.0.0.1/*"],
+  "permissions": ["storage"]
 }
