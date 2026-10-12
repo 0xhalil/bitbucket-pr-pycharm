@@ -32,6 +32,8 @@ Bitbucket'ta herhangi bir PR sayfasinda sag altta uc buton cikar:
   once/sonra karsilastirmasi, degilsen tum PR'in klasor diff'i (degisen dosyalar
   arasi gezinme dahil). Base taraf merge-base'dir, yani Bitbucket'in gosterdigi
   diff ile ayni mantik. Yeni/silinmis dosyada tek taraf acilip bilgi verilir.
+- **AI için Kopyala** — diff'i (dosyadaysan dosya, degilsen tum PR) unified diff
+  olarak panoya kopyalar; AI review icin yapistirirsin. 200K karakterde kesilir.
 
 Repo ilk seferde **tum bilgisayarda** aranir (Spotlight + home dizini),
 bulunca `~/.config/bb-pycharm-helper/repos.json`'a kaydedilir.
