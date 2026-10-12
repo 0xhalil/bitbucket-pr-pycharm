@@ -24,9 +24,12 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+HELPER_VERSION = "1.3.0"
 
 PYCHARM_BIN = "/Applications/PyCharm.app/Contents/MacOS/pycharm"
 HOME = Path.home()
@@ -349,6 +352,36 @@ def diff_base_worktree(repo_dir, source, dest, pr):
 
 
 MAX_AI_DIFF = 200_000  # upper character limit for AI-copied diffs
+GC_DAYS = 7  # worktrees under /tmp older than this are removed (BB_PR_GC_DAYS, 0 disables)
+_LAST_GC = {"at": 0.0}
+
+
+def maybe_gc():
+    """Remove stale worktrees (at most once an hour). Only touches our own cache dir."""
+    try:
+        days = int(os.environ.get("BB_PR_GC_DAYS", str(GC_DAYS)))
+    except ValueError:
+        days = GC_DAYS
+    now = time.time()
+    if days <= 0 or now - _LAST_GC["at"] < 3600:
+        return
+    _LAST_GC["at"] = now
+    if WORKTREE_BASE.is_dir():
+        cutoff = now - days * 86400
+        for repo_dir in WORKTREE_BASE.iterdir():
+            if not repo_dir.is_dir():
+                continue
+            for wt in repo_dir.iterdir():
+                try:
+                    if wt.is_dir() and wt.stat().st_mtime < cutoff:
+                        shutil.rmtree(wt, ignore_errors=True)
+                except OSError:
+                    pass
+    seen = set()
+    for p in list(load_mapping().values())[:20]:
+        if p not in seen and Path(p).is_dir():
+            seen.add(p)
+            git_out(p, "worktree", "prune")
 
 
 def open_diff(left, right):
@@ -381,6 +414,61 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def check_origin(self):
+        """Only Bitbucket pages (via our extension) and local tools may call us.
+
+        The browser always sends Origin on fetch; a missing Origin means curl or a
+        direct navigation, which cannot read responses cross-origin anyway."""
+        o = (self.headers.get("Origin") or "").strip()
+        if not o:
+            return True
+        return o == "https://bitbucket.org" or o.startswith("chrome-extension://")
+
+    def diagnose(self, q):
+        """Read-only step-by-step checks (never opens the IDE, never clones)."""
+        g = lambda k: (q.get(k, [""])[0] or "").strip()
+        workspace, repo = g("workspace"), g("repo")
+        source, dest = g("source").replace("…", "..."), g("dest").replace("…", "...")
+        if not (RE_WS.match(workspace) and RE_REPO.match(repo)):
+            return self.send_json(400, {"ok": False, "error": "bad workspace/repo"})
+        d = {"ok": True, "version": HELPER_VERSION, "checks": {}}
+        c = d["checks"]
+        repo_dir = find_repo(workspace, repo)
+        c["repo_found"] = {"ok": bool(repo_dir), "path": str(repo_dir) if repo_dir else None}
+        if not repo_dir:
+            d["ok"] = False
+            return self.send_json(200, d)
+        remotes = git_out(repo_dir, "remote", "-v")
+        c["remote"] = {"ok": bool(remotes), "detail": (remotes.splitlines() or [""])[0][:120]}
+        for role, name in (("source", source), ("dest", dest)):
+            if not name:
+                continue
+            try:
+                full = resolve_branch(repo_dir, name)
+            except AmbiguousBranch as a:
+                c[role] = {"ok": False, "detail": f"ambiguous: {', '.join(a.candidates[:8])}"}
+                d["ok"] = False
+                continue
+            ono = git_out(repo_dir, "rev-parse", "--verify", f"origin/{full}")
+            loc = git_out(repo_dir, "rev-parse", "--verify", full)
+            c[role] = {"ok": bool(ono or loc), "resolved": full,
+                       "on_remote": bool(ono), "local": bool(loc)}
+            if not (ono or loc):
+                d["ok"] = False
+        if source and dest and c.get("source", {}).get("ok") and c.get("dest", {}).get("ok"):
+            mb = git_out(repo_dir, "merge-base",
+                         f"origin/{c['source']['resolved']}", f"origin/{c['dest']['resolved']}") or \
+                 git_out(repo_dir, "merge-base",
+                         c["source"]["resolved"], c["dest"]["resolved"])
+            c["merge_base"] = {"ok": bool(mb), "sha": (mb or "")[:12]}
+            if not mb:
+                d["ok"] = False
+        b = pycharm_bin()
+        c["pycharm"] = {"ok": bool(b), "bin": b}
+        if not b:
+            d["ok"] = False
+        return self.send_json(200, d)
 
     def ai_diff(self, q):
         """Produce a unified diff for AI review (single file when on a file, whole PR otherwise).
@@ -450,7 +538,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/health":
-            return self.send_json(200, {"ok": True})
+            return self.send_json(200, {"ok": True, "version": HELPER_VERSION})
+        if u.path in ("/open", "/ai-diff", "/diagnose") and not self.check_origin():
+            return self.send_json(403, {"ok": False, "error": "forbidden origin"})
+        maybe_gc()
+        if u.path == "/diagnose":
+            return self.diagnose(parse_qs(u.query))
         if u.path == "/ai-diff":
             return self.ai_diff(parse_qs(u.query))
         if u.path != "/open":

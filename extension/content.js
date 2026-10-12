@@ -220,6 +220,30 @@
     } catch { /* cancelled */ }
   }
 
+  async function copyDiagnose() {
+    try {
+      const c = ctx();
+      if (!c) return toast('Could not parse repo/PR');
+      const { file } = fileFromHash();
+      const { source, dest } = await getBranches();
+      toast('Collecting diagnostics…');
+      chrome.runtime.sendMessage(
+        { type: 'bb-pycharm-open', path: '/diagnose',
+          params: { workspace: c.workspace, repo: c.repo, pr: c.pr, file, source, dest } },
+        async (res) => {
+          if (chrome.runtime.lastError) return toast('Extension error: ' + chrome.runtime.lastError.message);
+          if (!res || res.httpStatus === 0) return toast('Helper is not running!');
+          try {
+            await navigator.clipboard.writeText(JSON.stringify(res.body, null, 1));
+            toast('Diagnostics copied — paste it to support.');
+          } catch {
+            toast("Couldn't copy (no clipboard permission)");
+          }
+        }
+      );
+    } catch { /* cancelled */ }
+  }
+
   function toast(msg) {
     let el = document.getElementById('bb-pycharm-toast');
     if (!el) {
@@ -263,6 +287,7 @@
     bar.appendChild(mk('▶ Open Project', 'Check out the PR branch as a worktree and open the whole project in PyCharm', openProject));
     bar.appendChild(mk('▶ Open Diff', 'Before/after comparison in the PyCharm diff viewer (file when on a file, whole PR otherwise)', openDiff));
     bar.appendChild(mk('Copy for AI', 'Copy the diff to the clipboard for AI review (file when on a file, whole PR otherwise)', copyForAI));
+    bar.appendChild(mk('Copy Diagnostics', 'Copy a step-by-step diagnostic report for troubleshooting', copyDiagnose));
     document.body.appendChild(bar);
   }
 

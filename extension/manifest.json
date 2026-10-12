@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bitbucket PR -> PyCharm",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Open Bitbucket PR files, diffs and projects in PyCharm with one click (via a local helper, no token needed).",
   "content_scripts": [
     {

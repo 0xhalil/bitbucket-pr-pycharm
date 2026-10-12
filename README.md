@@ -45,6 +45,30 @@ How it works: the extension reads workspace/repo/PR/file/branches from the page
 home directory, then caches it), clones via SSH if missing, prepares worktrees
 for the PR branch and its merge-base, and invokes PyCharm.
 
+## Security model
+
+The helper listens on `127.0.0.1` only and accepts requests from Bitbucket pages
+(via the extension) and local tools. Any other web origin gets `403 forbidden`,
+so random websites cannot read your diffs through it. No Bitbucket credentials
+or tokens are stored anywhere.
+
+## Environment variables
+
+- `BB_PR_PORT` (default `8765`), `BB_PR_ROOTS` (`:`-separated search roots),
+  `BB_PR_WORKTREE_BASE` (default `/tmp/bb-pr`),
+  `BB_PR_GC_DAYS` (worktrees older than this are auto-removed, default `7`, `0` disables),
+  `BB_PYCHARM_BIN` (override PyCharm auto-detection), `DRY_RUN=1` (never launch PyCharm).
+- `GET /diagnose?...` returns read-only step-by-step checks (repo, remote,
+  branches, merge-base, PyCharm) — the extension's **Copy Diagnostics** button
+  copies it for troubleshooting.
+
+## Chrome Web Store publishing (optional, removes the Load-unpacked step)
+
+1. Pay the one-time $5 developer fee at the Chrome Web Store console.
+2. Upload `bitbucket-pr-pycharm-chrome-vX.Y.Z.zip` from this repo.
+3. Fill in the listing (description + one screenshot of a PR page with the buttons).
+4. After review, teammates install with one click and get auto-updates.
+
 ## Uninstall
 
 ```bash
